@@ -120,15 +120,15 @@ def plan_lesson():
         {"role": "system", "content": SYSTEM_INSTR},
         {"role": "user", "content": make_user_prompt(topic, base_text)},
     ]
-    # FIX: use response_format (not text_format)
-    resp = client.responses.create(
+    resp = client.chat.completions.create(
         model=OPENAI_MODEL,
-        input=messages,
+        messages=messages,
         temperature=0.7,
         seed=seed or None,
         response_format={"type": "json_object"},
     )
-    return json.loads(resp.output_text)
+    content = resp.choices[0].message.content
+    return json.loads(content)
 
 def tts_to_wav(text: str, voice: str) -> AudioSegment:
     speech = client.audio.speech.create(
