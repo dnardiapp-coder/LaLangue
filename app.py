@@ -7,7 +7,7 @@ from pydub.generators import
 from openai import OpenAI
 
 # --------- CONFIG ---------
-OPENAI_MODEL = "gpt-4o"   # or "gpt-5"
+OPENAI_MODEL = "gpt-5"   # or "gpt-5"
 TTS_VOICE_COACH = "alloy"
 TTS_VOICE_NATIVE = "verse"
 MAX_INPUT_CHARS = 8000
