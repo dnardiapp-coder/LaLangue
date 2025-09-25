@@ -11,7 +11,8 @@ if not API_KEY:
     st.stop()
 
 # --------- CONFIG ---------
-OPENAI_MODEL = "gpt-5"   # or "gpt-5"
+RESPONSES_MODEL = "gpt-4o-mini"       # planner model (JSON capable)
+TTS_MODEL = "gpt-4o-mini-tts"         # text-to-speech
 TTS_VOICE_COACH = "alloy"
 TTS_VOICE_NATIVE = "verse"
 MAX_INPUT_CHARS = 8000
@@ -95,7 +96,7 @@ Schema:
        "t": 0.0,
        "action": "prompt" | "answer" | "recall",
        "voice": "coach" | "native",
-       "text_en": "Say: I'd like coffee", 
+       "text_en": "Say: I'd like coffee",
        "text_tl": "Vorrei un caffè.",
        "expect_tl": "Vorrei un caffè.",
        "pause_sec": 4.5,
@@ -120,24 +121,32 @@ def plan_lesson():
         {"role": "system", "content": SYSTEM_INSTR},
         {"role": "user", "content": make_user_prompt(topic, base_text)},
     ]
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-        temperature=0.7,
-        seed=seed or None,
-        response_format={"type": "json_object"},
-    )
-    content = resp.choices[0].message.content
-    return json.loads(content)
+    try:
+        resp = client.responses.create(
+            model=RESPONSES_MODEL,
+            input=messages,                      # Responses API accepts message list
+            temperature=0.7,
+            seed=seed or None,
+            response_format={"type": "json_object"},
+        )
+        content = resp.output_text  # convenient accessor for text content
+        return json.loads(content)
+    except Exception as e:
+        st.error(f"Failed to plan lesson: {e}")
+        st.stop()
 
-def tts_to_wav(text: str, voice: str) -> AudioSegment:
-    speech = client.audio.speech.create(
-        model="gpt-4o-mini-tts",
-        voice=voice,
-        input=text
-    )
-    audio_bytes = speech.read()
-    return AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+def tts_to_seg(text: str, voice: str) -> AudioSegment:
+    try:
+        speech = client.audio.speech.create(
+            model=TTS_MODEL,
+            voice=voice,
+            input=text
+        )
+        audio_bytes = speech.read()
+        return AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+    except Exception as e:
+        st.error(f"TTS failed: {e}")
+        st.stop()
 
 def assemble_audio(timeline: List[Dict]) -> (AudioSegment, List[str]):
     lesson = AudioSegment.silent(duration=250)
@@ -147,47 +156,5 @@ def assemble_audio(timeline: List[Dict]) -> (AudioSegment, List[str]):
         text_en, text_tl = (step.get("text_en") or "").strip(), (step.get("text_tl") or "").strip()
         pause_sec = float(step.get("pause_sec", 0))
 
-        if action in ("prompt","recall") and voice=="coach" and text_en:
-            seg = tts_to_wav(text_en, TTS_VOICE_COACH)
-            lesson += seg + AudioSegment.silent(duration=int(pause_sec * 1000))
-            captions.append(f"COACH: {text_en} [pause {pause_sec:.1f}s]")
-
-        elif action=="answer" and voice=="native" and text_tl:
-            seg = tts_to_wav(text_tl, TTS_VOICE_NATIVE)
-            lesson += seg
-            captions.append(f"NATIVE: {text_tl}")
-
-        if action=="prompt" and step.get("expect_tl"):
-            ans = step["expect_tl"].strip()
-            seg = tts_to_wav(ans, TTS_VOICE_NATIVE)
-            lesson += seg
-            captions.append(f"NATIVE (answer): {ans}")
-
-        lesson += AudioSegment.silent(duration=200)
-    return lesson, captions
-
-if st.button("Generate Lesson", type="primary"):
-    if not (topic or base_text):
-        st.warning("Please enter a topic or provide text.")
-        st.stop()
-
-    with st.spinner("Creating lesson..."):
-        plan = plan_lesson()
-
-    if show_transcript:
-        st.subheader("Lesson JSON (preview)")
-        st.json(plan)
-
-    with st.spinner("Synthesizing audio..."):
-        audio, caps = assemble_audio(plan["timeline"])
-
-    buf = io.BytesIO()
-    audio.export(buf, format="mp3", bitrate="128k")
-    buf.seek(0)
-
-    st.audio(buf, format="audio/mp3")
-    st.download_button("Download MP3", buf, file_name="lesson.mp3", mime="audio/mpeg")
-
-    if show_transcript:
-        st.subheader("Script")
-        st.write("\n".join(caps))
+        if action in ("prompt", "recall") and voice == "coach" and text_en:
+            seg = tts_to_seg(tex
