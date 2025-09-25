@@ -11,7 +11,7 @@ if not API_KEY:
     st.stop()
 
 # --------- CONFIG ---------
-OPENAI_MODEL = "gpt-4o"   # or "gpt-5"
+OPENAI_MODEL = "gpt-5"   # or "gpt-5"
 TTS_VOICE_COACH = "alloy"
 TTS_VOICE_NATIVE = "verse"
 MAX_INPUT_CHARS = 8000
@@ -117,15 +117,16 @@ Contexts must be natural (e.g., cafe, greeting).
 
 def plan_lesson():
     messages = [
-        {"role":"system","content": SYSTEM_INSTR},
-        {"role":"user","content": make_user_prompt(topic, base_text)}
+        {"role": "system", "content": SYSTEM_INSTR},
+        {"role": "user", "content": make_user_prompt(topic, base_text)},
     ]
+    # FIX: use response_format (not text_format)
     resp = client.responses.create(
         model=OPENAI_MODEL,
         input=messages,
         temperature=0.7,
         seed=seed or None,
-        text_format={"type":"json_object"}
+        response_format={"type": "json_object"},
     )
     return json.loads(resp.output_text)
 
