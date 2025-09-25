@@ -4,13 +4,19 @@ from pydub import AudioSegment
 from typing import List, Dict
 from openai import OpenAI
 
+# --------- READ API KEY SAFELY ----------
+API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+if not API_KEY:
+    st.error("❌ OPENAI_API_KEY not set. Add it in Streamlit Secrets or your local environment.")
+    st.stop()
+
 # --------- CONFIG ---------
-OPENAI_MODEL = "gpt-5"   # or "gpt-5"
+OPENAI_MODEL = "gpt-4o"   # or "gpt-5"
 TTS_VOICE_COACH = "alloy"
 TTS_VOICE_NATIVE = "verse"
 MAX_INPUT_CHARS = 8000
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=API_KEY)
 
 # Streamlit UI setup
 st.set_page_config(page_title="LaLangue", page_icon="🎧", layout="centered")
