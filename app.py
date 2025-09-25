@@ -166,7 +166,7 @@ def estimate_timeline_seconds(timeline: List[Dict]) -> float:
         total += 0.2
     return total
 
-def need_more(plan: Dict]) -> Tuple[bool, float, float]:
+def need_more(plan: Dict) -> Tuple[bool, float, float]:
     secs = estimate_timeline_seconds(plan.get("timeline", []))
     target = duration_min * 60.0
     return (secs < target * 0.98), secs, target
