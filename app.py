@@ -124,9 +124,8 @@ def plan_lesson():
     try:
         resp = client.responses.create(
             model=RESPONSES_MODEL,
-            input=messages,                      # Responses API accepts message list
+            input=messages,
             temperature=0.7,
-            seed=seed or None,
             response_format={"type": "json_object"},
         )
         content = resp.output_text  # convenient accessor for text content
