@@ -1,5 +1,8 @@
 streamlit==1.37.0
-openai>=1.40.0
+openai==1.109.1
 pydub==0.25.1
-pyaudioop>=0.1.6
 pypdf==4.3.1
+# Provide audioop back on Python 3.13+
+audioop-lts; python_version>="3.13"
+# Keep Streamlit happy with a compatible rich
+rich<14
