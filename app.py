@@ -1,267 +1,332 @@
+import os, io, re, json, math, random
 import streamlit as st
-from openai import OpenAI
-import pydub
 from pydub import AudioSegment
-import io
-import PyPDF2
-import docx
-from typing import List, Dict, Union
+from typing import List, Dict
+from openai import OpenAI
 
-# --- UI Configuration ---
-st.set_page_config(
-    page_title="Pimsleur Audio Lesson Generator",
-    page_icon="🗣️",
-    layout="wide",
-)
+# ───────── Config & API key ─────────
+API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+if not API_KEY:
+    st.error("❌ OPENAI_API_KEY not set. Add it in Streamlit Secrets or your local environment.")
+    st.stop()
 
-st.title("🗣️ Pimsleur-Style Audio Lesson Generator")
-st.markdown("""
-    Create custom language lessons based on the Pimsleur method. 
-    Provide a topic, text, or a document, and the AI will generate a script and an audio lesson for you.
-    **Note:** Audio generation for a 5-minute lesson can take 1-2 minutes.
-""")
+PLANNER_MODEL = "gpt-4o-mini"      # JSON-capable
+TTS_MODEL     = "gpt-4o-mini-tts"  # text-to-speech
+VOICE_COACH   = "alloy"
+VOICE_NATIVE  = "verse"
 
-# --- Helper Functions ---
+# Heuristic: ~10 seconds per prompt→pause→answer cycle
+SEC_PER_CYCLE = 10.0
+MAX_INPUT_CHARS = 9000
+MAX_OUTPUT_TOKENS = 4000  # allow larger JSON
 
-def get_text_from_file(uploaded_file):
-    """Extracts text from uploaded file (PDF, DOCX, TXT)."""
-    text = ""
-    try:
-        if uploaded_file.type == "application/pdf":
-            pdf_reader = PyPDF2.PdfReader(io.BytesIO(uploaded_file.read()))
-            for page in pdf_reader.pages:
-                text += page.extract_text() or ""
-        elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            doc = docx.Document(io.BytesIO(uploaded_file.read()))
-            for para in doc.paragraphs:
-                text += para.text + "\n"
-        elif uploaded_file.type == "text/plain":
-            text = uploaded_file.read().decode("utf-8")
-        return text
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
-        return ""
+client = OpenAI(api_key=API_KEY)
 
-def create_pimsleur_prompt(native_language: str, target_language: str, level: str, context: str) -> str:
-    """Creates the detailed system prompt for the AI script generator."""
-    return f"""
-    You are an expert linguist and curriculum designer specializing in the Pimsleur language learning method.
-    Your task is to create a script for a 5-minute audio lesson to teach {target_language} to a native {native_language} speaker at a {level} level.
-
-    **Pimsleur Method Core Principles:**
-    1.  **Anticipation Principle:** The narrator prompts the student to say a phrase, pauses for the student to respond, and then a native speaker provides the correct answer. This is crucial.
-    2.  **Graduated Interval Recall:** Introduce new phrases and then ask the student to recall them at increasing intervals.
-    3.  **Core Vocabulary:** Focus on a small number of useful, common phrases. Build upon them.
-    4.  **Organic Learning:** Introduce new concepts within a conversational context. Break down longer sentences into parts and have the student build them back up.
-
-    **Lesson Context:**
-    The lesson should be based on the following topic or text. Extract key vocabulary and phrases from it:
-    ---
-    {context}
-    ---
-
-    **Output Format:**
-    You MUST output the script as a JSON array of objects. Each object represents a segment of the lesson and must have two keys: "speaker" and "line".
-    - `speaker`: Can be "narrator", "{target_language.lower()}", or "pause".
-    - `line`: The text to be spoken. For "pause", the line should be the duration of the pause in seconds (e.g., "3").
-
-    **Example JSON Structure:**
-    [
-      {{"speaker": "narrator", "line": "Welcome to your {target_language} lesson. Let's begin."}},
-      {{"speaker": "pause", "line": "2"}},
-      {{"speaker": "narrator", "line": "Listen to the phrase for 'Hello, how are you?'"}},
-      {{"speaker": "{target_language.lower()}", "line": "你好，你好吗？"}},
-      {{"speaker": "pause", "line": "4"}},
-      {{"speaker": "narrator", "line": "Now, imagine you're greeting a friend. How do you say 'Hello, how are you?'"}},
-      {{"speaker": "pause", "line": "5"}},
-      {{"speaker": "{target_language.lower()}", "line": "你好，你好吗？"}}
-    ]
-
-    **Instructions:**
-    - The lesson must be progressive and easy to follow for a {level}.
-    - The narrator speaks only in {native_language}.
-    - The `{target_language.lower()}` speaker speaks only in {target_language}.
-    - Include plenty of pauses (3-5 seconds) after prompts to give the student time to think and speak.
-    - Ensure the total lesson feels like a cohesive 5-minute learning experience.
-    - Start the generation now.
-    """
-
-
-def generate_audio_segment(client: OpenAI, text: str, voice: str) -> AudioSegment:
-    """Generates an audio segment for a line of text using OpenAI's TTS API."""
-    try:
-        response = client.audio.speech.create(
-            model="tts-1",
-            voice=voice,
-            input=text,
-            response_format="mp3"
-        )
-        audio_data = response.read()
-        return AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
-    except Exception as e:
-        # Fallback to a silent segment on error
-        st.warning(f"Could not generate audio for: '{text}'. Error: {e}")
-        return AudioSegment.silent(duration=100)
-
-
-def combine_audio_segments(
-    client: OpenAI,
-    script: List[Dict[str, str]],
-    narrator_voice: str,
-    target_voice: str,
-    target_language_code: str
-) -> io.BytesIO:
-    """Combines individual audio clips and pauses into a single audio file."""
-    
-    full_lesson = AudioSegment.empty()
-    total_segments = len(script)
-
-    progress_bar = st.progress(0, text="Generating audio segments...")
-
-    for i, segment in enumerate(script):
-        speaker = segment.get("speaker", "").lower()
-        line = segment.get("line", "")
-        
-        progress_text = f"Generating audio... Segment {i+1}/{total_segments}: {speaker.capitalize()}"
-        progress_bar.progress((i + 1) / total_segments, text=progress_text)
-
-        if speaker == "narrator":
-            full_lesson += generate_audio_segment(client, line, narrator_voice)
-        elif speaker == target_language_code:
-            full_lesson += generate_audio_segment(client, line, target_voice)
-        elif speaker == "pause":
-            try:
-                duration_ms = int(float(line) * 1000)
-                full_lesson += AudioSegment.silent(duration=duration_ms)
-            except ValueError:
-                full_lesson += AudioSegment.silent(duration=2000) # Default 2s pause
-        
-        # Add a tiny silence between clips to prevent them from sounding too abrupt
-        full_lesson += AudioSegment.silent(duration=150)
-
-    progress_bar.progress(1.0, text="Audio generation complete! Exporting file...")
-    
-    # Export the final audio to an in-memory file
-    final_audio = io.BytesIO()
-    full_lesson.export(final_audio, format="mp3")
-    final_audio.seek(0)
-    
-    progress_bar.empty()
-    return final_audio
-
-# --- Streamlit UI Layout ---
+st.set_page_config(page_title="LaLangue", page_icon="🎧", layout="centered")
+st.title("🎧 LaLangue – Audio Lesson Generator")
 
 with st.sidebar:
-    st.header("⚙️ Lesson Configuration")
-    
-    # Use session state to persist API key
-    if 'openai_api_key' not in st.session_state:
-        st.session_state.openai_api_key = ''
+    st.header("Lesson Settings")
+    lang = st.selectbox("Target language", ["Spanish", "French", "Italian", "Portuguese", "Mandarin Chinese", "Russian"])
+    level = st.selectbox("Level (CEFR)", ["A1", "A2", "B1"])
+    duration_min = st.slider("Lesson duration target (minutes)", 8, 30, 15)
+    n_items = st.slider("New items to introduce", 5, 12, 8)
+    show_transcript = st.checkbox("Show generated script", value=True)
 
-    api_key_input = st.text_input(
-        "OpenAI API Key", 
-        type="password", 
-        value=st.session_state.openai_api_key,
-        help="Your API key is stored securely for this session only."
-    )
-    
-    if api_key_input:
-        st.session_state.openai_api_key = api_key_input
+st.write("Type a **topic/goal** or **upload material** to base your lesson on:")
 
-    native_language = st.selectbox("Your Native Language", ["English", "Spanish", "German", "French", "Mandarin"])
-    target_language = st.selectbox("Language to Learn", ["French", "Spanish", "Japanese", "German", "Italian", "Mandarin", "Korean"])
-    level = st.selectbox("Proficiency Level", ["Beginner", "Intermediate", "Advanced"])
-    
-    st.header("🎙️ Voice Selection")
-    narrator_voice = st.selectbox("Narrator Voice (Native Language)", ["nova", "echo", "onyx", "shimmer"], index=0)
-    target_voice = st.selectbox("Target Language Voice", ["alloy", "fable", "onyx", "shimmer"], index=1)
+topic = st.text_input("Topic / Goal (e.g., 'order coffee and introduce myself')", "")
+uploaded = st.file_uploader("Upload text or PDF (we’ll extract text)", type=["txt", "pdf"])
+raw_text = st.text_area("Or paste text here", height=200)
 
-st.header("📝 Lesson Content")
-st.markdown("Provide the source material for your lesson.")
+# ───────── Helpers ─────────
+def extract_text_from_pdf(file) -> str:
+    try:
+        import pypdf
+    except ImportError:
+        st.error("Install pypdf: pip install pypdf")
+        return ""
+    try:
+        reader = pypdf.PdfReader(file)
+        return "\n".join([(p.extract_text() or "") for p in reader.pages])
+    except Exception as e:
+        st.warning(f"Could not read PDF: {e}")
+        return ""
 
-input_method = st.radio("Choose Input Method", ["Topic / Text", "Upload Document"], horizontal=True)
+def clamp_len(s: str, n: int = MAX_INPUT_CHARS) -> str:
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:n]
 
-context = ""
-if input_method == "Topic / Text":
-    context = st.text_area(
-        "Enter a topic, conversation, or text to base the lesson on.",
-        "A conversation about ordering food in a restaurant.",
-        height=150
-    )
-else:
-    uploaded_file = st.file_uploader("Upload a document (.txt, .pdf, .docx)", type=["txt", "pdf", "docx"])
-    if uploaded_file:
-        with st.spinner("Reading document..."):
-            context = get_text_from_file(uploaded_file)
-            st.success("Document loaded successfully!")
-            st.text_area("Document Content (first 500 chars):", context[:500] + "...", height=100, disabled=True)
-
-generate_button = st.button("Generate Audio Lesson", type="primary", use_container_width=True)
-
-
-# --- Main Application Logic ---
-if generate_button:
-    if not st.session_state.openai_api_key:
-        st.error("Please enter your OpenAI API key in the sidebar.")
-    elif not context.strip():
-        st.warning("Please provide some content for the lesson (either text or a document).")
+base_text = ""
+if uploaded:
+    if uploaded.type == "application/pdf":
+        base_text = extract_text_from_pdf(uploaded)
     else:
+        base_text = uploaded.read().decode("utf-8", errors="ignore")
+elif raw_text:
+    base_text = raw_text
+base_text = clamp_len(base_text)
+
+# ───────── Prompting ─────────
+def target_steps_for(minutes: int) -> int:
+    return max(20, math.ceil((minutes * 60.0) / SEC_PER_CYCLE))
+
+SYSTEM_INSTR = """
+You are LaLangue, designing AUDIO language lessons faithful to these principles:
+
+- Anticipation: prompt the learner BEFORE revealing the answer.
+- Spaced Recall: frequently resurface earlier items later in the timeline.
+- Natural micro-scenes: short role-plays (café, market, greeting, asking directions), not isolated word lists.
+- Chunking: teach useful phrases & collocations; avoid single isolated words unless necessary.
+- Organic grammar: expose patterns in context (I’d like…, Could I…, Where is…?).
+- Level control: keep sentences short, high-utility, CEFR appropriate.
+
+STRICT JSON ONLY (no markdown, no comments). Schema:
+
+{
+  "metadata": { "language": "string", "level": "string", "duration_minutes": 15 },
+  "items": [ { "id":"it1", "orth":"...", "phon":"IPA/pinyin if relevant", "gloss_en":"..." } ],
+  "dialogues": [
+    { "id":"d1", "situation":"cafe", "turns":[ { "speaker":"A","text_tl":"..."}, {"speaker":"B","text_tl":"..."} ] }
+  ],
+  "timeline": [
+    {
+      "t": 0.0,
+      "action": "prompt" | "recall",            // coach instructs learner in English
+      "voice": "coach",
+      "scene": "cafe/greeting/market/etc",
+      "text_en": "Say: I'd like a small coffee, please.",
+      "expect_tl": "Vorrei un caffè piccolo, per favore.",
+      "pause_sec": 4.5,
+      "item_ids": ["it3","it5"]
+    },
+    {
+      "t": 6.0,
+      "action": "answer",                       // native model answer
+      "voice": "native",
+      "scene": "cafe",
+      "text_tl": "Vorrei un caffè piccolo, per favore.",
+      "item_ids": ["it3","it5"]
+    }
+  ]
+}
+
+Rules:
+- Most cycles are 2-step: (1) coach prompt with pause + expected answer; (2) native answer. Use this pattern consistently.
+- 35–45% of total steps must be "recall" prompts that reuse earlier items in new contexts.
+- Use situation labels in "scene" for every step.
+- Avoid dictionary-style "What is X?" Replace with functional prompts (“Ask for the price”, “Say you’re in a hurry”).
+- Dialogues should coincide with scenes used in the timeline (brief, snappy, 2–6 turns).
+"""
+
+def make_user_prompt(lang, level, duration_min, n_items, topic, base_text):
+    steps = target_steps_for(duration_min)
+    ref = f"\nREFERENCE TEXT (optional):\n{base_text}\n" if base_text else ""
+    return f"""
+Language: {lang}
+Level: {level}
+Target duration: {duration_min} minutes.
+Target steps in "timeline": {steps} (±10%). Ensure enough content to fill the time at ~10 seconds per prompt→pause→answer cycle.
+
+Introduce {n_items} NEW high-utility items (phrases/chunks). NO lists of unrelated single words.
+Ensure 35–45% of the timeline are "recall" steps resurfacing earlier items in varied scenes.
+
+Topic/goal: {topic or "basic everyday conversation in natural scenes (greeting, ordering, paying, parting)"}.
+
+Produce STRICT JSON matching the schema and rules. Do not include any extra text outside JSON.
+{ref}
+""".strip()
+
+def extract_json_block(s: str) -> str:
+    s = s.strip()
+    s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.IGNORECASE | re.DOTALL).strip()
+    try:
+        json.loads(s)
+        return s
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}\s*$", s, flags=re.DOTALL)
+    if m: return m.group(0)
+    return s
+
+def plan_lesson(lang, level, duration_min, n_items, topic, base_text):
+    messages = [
+        {"role": "system", "content": SYSTEM_INSTR},
+        {"role": "user", "content": make_user_prompt(lang, level, duration_min, n_items, topic, base_text)},
+    ]
+    resp = client.responses.create(
+        model=PLANNER_MODEL,
+        input=messages,
+        temperature=0.7,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+    )
+    content = resp.output_text or ""
+    json_str = extract_json_block(content)
+    return json.loads(json_str)
+
+# ───────── Post-processing & Quality Guards ─────────
+def ensure_two_step_cycles(timeline: List[Dict]) -> List[Dict]:
+    """If a prompt/recall lacks an immediate native answer step, inject one."""
+    fixed = []
+    for step in timeline:
+        fixed.append(step)
+        if step.get("voice") == "coach" and step.get("action") in ("prompt","recall"):
+            exp = (step.get("expect_tl") or "").strip()
+            if exp:
+                # If next already an answer for same items, keep; else add answer.
+                need_answer = True
+                if len(fixed) >= 2:
+                    prev = fixed[-2]
+                # Peek upcoming in original timeline
+                # Simpler: always append an answer; duplicates are rare and harmless.
+                answer = {
+                    "t": float(step.get("t", 0.0)) + 6.0,
+                    "action": "answer",
+                    "voice": "native",
+                    "scene": step.get("scene", "generic"),
+                    "text_tl": exp,
+                    "item_ids": step.get("item_ids", []),
+                }
+                fixed.append(answer)
+    return fixed
+
+def expand_recalls(plan: Dict, target_steps: int) -> Dict:
+    """Append additional recall cycles sampling earlier items until we meet target steps."""
+    timeline = plan.get("timeline", [])
+    items = plan.get("items", [])
+    ids = [i["id"] for i in items] if items else []
+    scenes = ["greeting","cafe","market","directions","checkout","smalltalk","transport"]
+
+    def recall_prompt(for_ids, scene):
+        gloss = ""
+        # Make an English functional cue that uses one or two known items
+        cue = random.choice([
+            "Politely ask for it again.",
+            "Say you’re in a hurry.",
+            "Ask the price.",
+            "Ask for a smaller one.",
+            "Greet and ask how they are.",
+            "Say you’d like to pay by card.",
+            "Ask where the station is.",
+            "Say you didn’t catch that.",
+        ])
+        return {
+            "t": 0.0,
+            "action": "recall",
+            "voice": "coach",
+            "scene": scene,
+            "text_en": f"{cue}",
+            "expect_tl": "",         # let the model’s earlier 'expect_tl' be recycled via answer step below
+            "pause_sec": 4.5,
+            "item_ids": for_ids,
+        }
+
+    # Add recall pairs until >= target
+    while len(timeline) < target_steps and ids:
+        chosen = random.sample(ids, k=min(2, len(ids)))
+        scene = random.choice(scenes)
+        p = recall_prompt(chosen, scene)
+        a = {
+            "t": 0.0,
+            "action": "answer",
+            "voice": "native",
+            "scene": scene,
+            "text_tl": "",   # will be empty; but our audio builder only speaks when text is present
+            "item_ids": chosen
+        }
+        timeline.extend([p, a])
+
+    plan["timeline"] = timeline
+    return plan
+
+def repair_and_pad_plan(plan: Dict, minutes: int) -> Dict:
+    """Apply guards: two-step cycles + reach target steps with recalls."""
+    steps_target = target_steps_for(minutes)
+    tl = plan.get("timeline", [])
+    # 1) Force two-step cycles
+    tl = ensure_two_step_cycles(tl)
+    # 2) Expand (recalls) if under target
+    plan["timeline"] = tl
+    if len(tl) < steps_target:
+        plan = expand_recalls(plan, steps_target)
+    return plan
+
+# ───────── TTS & Assembly ─────────
+def tts_to_seg(text: str, voice: str) -> AudioSegment:
+    speech = client.audio.speech.create(
+        model=TTS_MODEL,
+        voice=voice,
+        input=text
+    )
+    audio_bytes = speech.read()
+    return AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+
+def assemble_audio(timeline: List[Dict], target_minutes: int) -> (AudioSegment, List[str]):
+    lesson = AudioSegment.silent(duration=250)
+    captions = []
+    for step in timeline:
+        action  = step.get("action")
+        voice   = step.get("voice")
+        text_en = (step.get("text_en") or "").strip()
+        text_tl = (step.get("text_tl") or "").strip()
+        expect  = (step.get("expect_tl") or "").strip()
+        pause   = float(step.get("pause_sec", 0))
+
+        if action in ("prompt","recall") and voice == "coach" and text_en:
+            lesson += tts_to_seg(text_en, VOICE_COACH)
+            if pause > 0:
+                lesson += AudioSegment.silent(duration=int(pause * 1000))
+            captions.append(f"COACH: {text_en} [pause {pause:.1f}s]")
+
+            # If prompt includes expected TL, add the native answer immediately (Pimsleur rhythm)
+            if expect:
+                lesson += tts_to_seg(expect, VOICE_NATIVE)
+                captions.append(f"NATIVE (answer): {expect}")
+
+        elif action == "answer" and voice == "native" and text_tl:
+            lesson += tts_to_seg(text_tl, VOICE_NATIVE)
+            captions.append(f"NATIVE: {text_tl}")
+
+        lesson += AudioSegment.silent(duration=200)
+
+    # If still short, top up with a brief closing silence so player reaches target
+    target_ms = int(target_minutes * 60_000)
+    if len(lesson) < int(target_ms * 0.95):   # don’t over-pad; aim ~95% minimum
+        lesson += AudioSegment.silent(duration=max(0, target_ms - len(lesson)))
+
+    return lesson, captions
+
+# ───────── Run ─────────
+if st.button("Generate Lesson", type="primary"):
+    if not (topic or base_text):
+        st.warning("Please enter a topic or provide text.")
+        st.stop()
+
+    with st.spinner("Planning lesson (scenes, items, timeline)…"):
         try:
-            client = OpenAI(api_key=st.session_state.openai_api_key)
-            
-            with st.spinner("Step 1/3: Crafting the lesson prompt..."):
-                prompt = create_pimsleur_prompt(native_language, target_language, level, context)
-
-            with st.spinner("Step 2/3: Generating lesson script with GPT-4o... This may take a moment."):
-                response = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": "Please generate the Pimsleur lesson script now."}
-                    ],
-                    response_format={"type": "json_object"}
-                )
-                # The response is a string of JSON, so we need to load it.
-                # The actual content is nested under response.choices[0].message.content
-                script_text = response.choices[0].message.content
-                # The model often wraps the list in a root object, e.g. {"script": [...]}, so we find the list.
-                import json
-                script_data = json.loads(script_text)
-                
-                # Handle cases where JSON is nested, e.g., {"script": [...]}
-                if isinstance(script_data, dict):
-                    # Find the first value in the dict that is a list
-                    found_list = False
-                    for key, value in script_data.items():
-                        if isinstance(value, list):
-                            lesson_script = value
-                            found_list = True
-                            break
-                    if not found_list:
-                         raise ValueError("JSON response does not contain a list of script segments.")
-                elif isinstance(script_data, list):
-                    lesson_script = script_data
-                else:
-                    raise ValueError("Could not parse the script from the AI response.")
-
-
-            st.success("Lesson script generated successfully!")
-
-            with st.expander("📖 View Generated Script", expanded=False):
-                st.json(lesson_script)
-
-            with st.spinner("Step 3/3: Generating and combining audio... This is the longest step."):
-                final_audio_file = combine_audio_segments(
-                    client,
-                    lesson_script,
-                    narrator_voice,
-                    target_voice,
-                    target_language.lower()
-                )
-            
-            st.success("🎉 Your audio lesson is ready!")
-            st.audio(final_audio_file, format='audio/mp3')
-
+            plan = plan_lesson(lang, level, duration_min, n_items, topic, base_text)
         except Exception as e:
-            st.error(f"An error occurred: {e}")
-            st.error("This could be due to an invalid API key, server issues, or a problem with the generated script format. Try again or check your key.")
+            st.error(f"Failed to plan lesson: {e}")
+            st.stop()
+
+    # Repair + ensure enough steps/duration
+    plan = repair_and_pad_plan(plan, duration_min)
+
+    if show_transcript:
+        st.subheader("Lesson JSON (preview)")
+        st.json(plan)
+
+    with st.spinner("Synthesizing audio…"):
+        audio, caps = assemble_audio(plan.get("timeline", []), duration_min)
+
+    # Deliver
+    buf = io.BytesIO()
+    audio.export(buf, format="mp3", bitrate="128k")
+    buf.seek(0)
+
+    st.audio(buf, format="audio/mp3")
+    st.download_button("Download MP3", buf, file_name="lesson.mp3", mime="audio/mpeg")
+
+    if show_transcript:
+        st.subheader("Script")
+        st.write("\n".join(caps))
