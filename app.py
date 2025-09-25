@@ -1,13 +1,11 @@
 import os, io, re, json
 import streamlit as st
 from pydub import AudioSegment
-from pydub.generators import Silence
-from typing import List, Dictt
-from pydub.generators import 
+from typing import List, Dict
 from openai import OpenAI
 
 # --------- CONFIG ---------
-OPENAI_MODEL = "gpt-5"   # or "gpt-5"
+OPENAI_MODEL = "gpt-4o"   # or "gpt-5"
 TTS_VOICE_COACH = "alloy"
 TTS_VOICE_NATIVE = "verse"
 MAX_INPUT_CHARS = 8000
@@ -144,7 +142,7 @@ def assemble_audio(timeline: List[Dict]) -> (AudioSegment, List[str]):
 
         if action in ("prompt","recall") and voice=="coach" and text_en:
             seg = tts_to_wav(text_en, TTS_VOICE_COACH)
-            lesson += seg + Silence(duration=int(pause_sec*1000)).to_audio_segment()
+            lesson += seg + AudioSegment.silent(duration=int(pause_sec * 1000))
             captions.append(f"COACH: {text_en} [pause {pause_sec:.1f}s]")
 
         elif action=="answer" and voice=="native" and text_tl:
