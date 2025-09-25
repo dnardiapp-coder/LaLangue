@@ -2,7 +2,8 @@ import os, io, re, json
 import streamlit as st
 from pydub import AudioSegment
 from pydub.generators import Silence
-from typing import List, Dict
+from typing import List, Dictt
+from pydub.generators import 
 from openai import OpenAI
 
 # --------- CONFIG ---------
